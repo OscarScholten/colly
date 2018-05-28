@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"hash/fnv"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ type Queue struct {
 	activeThreadCount int32
 	threadChans       []chan bool
 	lock              *sync.Mutex
+	enqueued          map[uint64]bool
 }
 
 // InMemoryQueueStorage is the default implementation of the Storage interface.
@@ -65,6 +67,7 @@ func New(threads int, s Storage) (*Queue, error) {
 		storage:     s,
 		lock:        &sync.Mutex{},
 		threadChans: make([]chan bool, 0, threads),
+		enqueued:    make(map[uint64]bool),
 	}, nil
 }
 
@@ -80,6 +83,10 @@ func (q *Queue) AddURL(URL string) error {
 	if err != nil {
 		return err
 	}
+	hash := createHash(URL)
+	if q.enqueued[hash] {
+		return nil
+	}
 	r := &colly.Request{
 		URL:    u,
 		Method: "GET",
@@ -88,11 +95,19 @@ func (q *Queue) AddURL(URL string) error {
 	if err != nil {
 		return err
 	}
-	return q.storage.AddRequest(d)
+	err = q.storage.AddRequest(d)
+	if err == nil {
+		q.enqueued[hash] = true
+	}
+	return err
 }
 
 // AddRequest adds a new Request to the queue
 func (q *Queue) AddRequest(r *colly.Request) error {
+	hash := createHash(r.URL.String())
+	if q.enqueued[hash] {
+		return nil
+	}
 	d, err := r.Marshal()
 	if err != nil {
 		return err
@@ -101,12 +116,20 @@ func (q *Queue) AddRequest(r *colly.Request) error {
 		return err
 	}
 	q.lock.Lock()
+	q.enqueued[hash] = true
 	for _, c := range q.threadChans {
 		c <- !stop
 	}
 	q.threadChans = make([]chan bool, 0, q.Threads)
 	q.lock.Unlock()
 	return nil
+}
+
+func createHash(u string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(u))
+	uHash := h.Sum64()
+	return uHash
 }
 
 // Size returns the size of the queue
